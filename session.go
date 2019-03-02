@@ -2,14 +2,21 @@
 package session
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 )
+
+type ErrChecksumFailed string
+
+func (e ErrChecksumFailed) Error() string { return string(e) }
 
 type Cryptor struct {
 	SecretKey      []byte
@@ -24,6 +31,7 @@ func NewSimpleCryptor(secretKey []byte, cookieName string) *Cryptor {
 		MakeCookieFunc: MakeCookieFunc(func(w http.ResponseWriter, r *http.Request) *http.Cookie {
 			return &http.Cookie{
 				Name: cookieName,
+				Path: "/",
 			}
 		}),
 	}
@@ -41,6 +49,8 @@ func (sc *Cryptor) Write(v interface{}, w http.ResponseWriter, r *http.Request) 
 		return err
 	}
 
+	chksum := sha256.Sum256(b)
+
 	// make init vector
 	iv := make([]byte, 16)
 	_, err = rand.Read(iv)
@@ -57,7 +67,7 @@ func (sc *Cryptor) Write(v interface{}, w http.ResponseWriter, r *http.Request) 
 	cfb.XORKeyStream(ciphertext, b)
 
 	cookie := sc.MakeCookieFunc(w, r)
-	cookie.Value = base64.RawURLEncoding.EncodeToString(iv) + "," + base64.RawURLEncoding.EncodeToString(ciphertext)
+	cookie.Value = base64.RawURLEncoding.EncodeToString(iv) + "," + base64.RawURLEncoding.EncodeToString(ciphertext) + "," + base64.RawURLEncoding.EncodeToString(chksum[:8])
 
 	http.SetCookie(w, cookie)
 
@@ -69,8 +79,7 @@ func (sc *Cryptor) Read(v interface{}, r *http.Request) error {
 
 	c, err := r.Cookie(sc.CookieName)
 	if err != nil {
-
-		return err
+		return fmt.Errorf("Error retrieving cookie '%s': %v", sc.CookieName, err)
 	}
 
 	cookieValueParts := strings.Split(c.Value, ",")
@@ -78,20 +87,23 @@ func (sc *Cryptor) Read(v interface{}, r *http.Request) error {
 	// extract init vector
 	iv, err := base64.RawURLEncoding.DecodeString(cookieValueParts[0])
 	if err != nil {
-
 		return err
 	}
 
 	// extract value
 	b, err := base64.RawURLEncoding.DecodeString(cookieValueParts[1])
 	if err != nil {
+		return err
+	}
 
+	// extract checksum
+	bchk, err := base64.RawURLEncoding.DecodeString(cookieValueParts[2])
+	if err != nil {
 		return err
 	}
 
 	block, err := aes.NewCipher(sc.SecretKey)
 	if err != nil {
-
 		return err
 	}
 
@@ -99,9 +111,14 @@ func (sc *Cryptor) Read(v interface{}, r *http.Request) error {
 	plaintext := make([]byte, len(b))
 	cfb.XORKeyStream(plaintext, b)
 
+	// make sure checksum matches
+	chksum := sha256.Sum256(plaintext)
+	if bytes.Compare(bchk, chksum[:8]) != 0 {
+		return ErrChecksumFailed("ErrChecksumFailed")
+	}
+
 	err = json.Unmarshal(plaintext, v)
 	if err != nil {
-
 		return err
 	}
 

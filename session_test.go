@@ -66,4 +66,6 @@ func TestSession(t *testing.T) {
 
 	fmt.Printf("testSsnData after decoding: %v\n", testSsnData)
 
+	// TODO: test checksum
+
 }
